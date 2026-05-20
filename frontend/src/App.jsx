@@ -75,7 +75,7 @@ export default function App() {
   async function speakText(id, text) {
     stopSpeak()
     stopFlagRef.current = false
-    await playUrl(`/tts?lang=${lang}&text=${encodeURIComponent(text)}`, id)
+    await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(text)}`, id)
   }
 
   async function speakAll() {
@@ -85,11 +85,11 @@ export default function App() {
     for (const q of filtered) {
       if (stopFlagRef.current) return
       const qText = q.hindi_question_text || q.question_text
-      await playUrl(`/tts?lang=${lang}&text=${encodeURIComponent(qText)}`, `q-${q.question_id}`)
+      await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(qText)}`, `q-${q.question_id}`)
       for (const o of (optionsByQid[q.question_id] || [])) {
         if (stopFlagRef.current) return
         const oText = o.hindi_option_label || o.option_label
-        await playUrl(`/tts?lang=${lang}&text=${encodeURIComponent(oText)}`, `o-${o.option_id}`)
+        await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(oText)}`, `o-${o.option_id}`)
       }
     }
   }

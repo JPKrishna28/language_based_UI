@@ -18,7 +18,7 @@ function gttsPlugin() {
   return {
     name: 'gtts-middleware',
     configureServer(server) {
-      server.middlewares.use('/tts', (req, res) => {
+      server.middlewares.use('/api/tts', (req, res) => {
         const { query } = parse(req.url, true)
         const text = String(query.text || '').trim().slice(0, 500)
         const lang = String(query.lang || 'hi').trim()
