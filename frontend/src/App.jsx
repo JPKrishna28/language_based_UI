@@ -2,22 +2,104 @@ import { useState, useEffect, useRef } from 'react'
 import { supabase } from './lib/supabase'
 import QuestionCard from './components/QuestionCard'
 
+function normalizeText(value) {
+  return String(value || '')
+    .toLowerCase()
+    .replace(/[.,/#!$%^&*;:{}=\-_`~()"'\\|\[\]?<>]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function numberHints(index) {
+  const n = index + 1
+  const map = {
+    1: ['1', 'one', 'first', 'option 1', 'option one', 'पहला', 'एक'],
+    2: ['2', 'two', 'second', 'option 2', 'option two', 'दूसरा', 'दो'],
+    3: ['3', 'three', 'third', 'option 3', 'option three', 'तीसरा', 'तीन'],
+    4: ['4', 'four', 'fourth', 'option 4', 'option four', 'चौथा', 'चार'],
+    5: ['5', 'five', 'fifth', 'option 5', 'option five', 'पांचवा', 'पांच'],
+  }
+  return map[n] || [String(n), `option ${n}`]
+}
+
+function scoreOptionMatch(option, transcript, index) {
+  const t = normalizeText(transcript)
+  if (!t) return 0
+
+  const labels = [
+    normalizeText(option.hindi_option_label),
+    normalizeText(option.option_label),
+    normalizeText(option.option_value),
+  ].filter(Boolean)
+
+  let score = 0
+  for (const label of labels) {
+    if (t === label) score = Math.max(score, 100)
+    if (t.includes(label) || label.includes(t)) score = Math.max(score, 75)
+
+    const lTokens = new Set(label.split(' ').filter(Boolean))
+    const tTokens = new Set(t.split(' ').filter(Boolean))
+    let overlap = 0
+    for (const token of lTokens) {
+      if (tTokens.has(token)) overlap += 1
+    }
+    if (overlap > 0) {
+      score = Math.max(score, 20 + overlap * 15)
+    }
+  }
+
+  for (const hint of numberHints(index)) {
+    const h = normalizeText(hint)
+    if (h && t.includes(h)) {
+      score = Math.max(score, 65)
+      break
+    }
+  }
+
+  return score
+}
+
+function findBestOption(options, transcript) {
+  let best = null
+  let bestScore = 0
+
+  options.forEach((option, index) => {
+    const score = scoreOptionMatch(option, transcript, index)
+    if (score > bestScore) {
+      best = option
+      bestScore = score
+    }
+  })
+
+  if (bestScore < 40) return null
+  return { option: best, score: bestScore }
+}
+
 export default function App() {
   const [questions, setQuestions] = useState([])
   const [optionsByQid, setOptionsByQid] = useState({})
+  const [answersByQid, setAnswersByQid] = useState({})
   const [scales, setScales] = useState([])
   const [selectedScale, setSelectedScale] = useState('')
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(null)
   const [lang, setLang] = useState('hi')
   const [playingId, setPlayingId] = useState(null)
+  const [listeningQid, setListeningQid] = useState(null)
+  const [voiceStatusByQid, setVoiceStatusByQid] = useState({})
 
   const audioRef = useRef(new Audio())
   const stopFlagRef = useRef(false)
+  const recognitionRef = useRef(null)
 
   useEffect(() => {
     fetchData()
-    return () => { audioRef.current.pause() }
+    return () => {
+      audioRef.current.pause()
+      if (recognitionRef.current) {
+        recognitionRef.current.abort()
+      }
+    }
   }, [])
 
   async function fetchData() {
@@ -60,6 +142,14 @@ export default function App() {
     setPlayingId(null)
   }
 
+  function stopListening() {
+    if (recognitionRef.current) {
+      recognitionRef.current.abort()
+      recognitionRef.current = null
+    }
+    setListeningQid(null)
+  }
+
   function playUrl(url, id) {
     return new Promise(resolve => {
       const audio = audioRef.current
@@ -79,6 +169,7 @@ export default function App() {
   }
 
   async function speakAll() {
+    stopListening()
     stopSpeak()
     stopFlagRef.current = false
     const filtered = selectedScale ? questions.filter(q => q.scale_id === selectedScale) : questions
@@ -92,6 +183,133 @@ export default function App() {
         await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(oText)}`, `o-${o.option_id}`)
       }
     }
+  }
+
+  function setAnswer(questionId, optionValue) {
+    setAnswersByQid(prev => ({ ...prev, [questionId]: optionValue }))
+  }
+
+  function recognitionLanguages(selectedLang) {
+    if (selectedLang === 'hi') return ['hi-IN', 'en-IN']
+    return ['en-IN', 'en-US']
+  }
+
+  async function readAndSelectByVoice(question, options, opts = {}) {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    if (!SpeechRecognition) {
+      setError('Speech recognition is not supported in this browser. Use Chrome/Edge.')
+      return
+    }
+
+    const qid = question.question_id
+    stopSpeak()
+    stopListening()
+    setError(null)
+    setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Reading options...' }))
+
+    const qText = question.hindi_question_text || question.question_text
+    await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(qText)}`, `q-${qid}`)
+
+    if (!opts.numericOnly) {
+      for (const option of options) {
+        const optionText = option.hindi_option_label || option.option_label
+        await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(optionText)}`, `o-${option.option_id}`)
+      }
+    } else {
+      setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Speak option number (e.g. 1) now' }))
+    }
+
+    // A short pause helps avoid microphone handoff glitches right after audio playback.
+    await new Promise(resolve => setTimeout(resolve, 250))
+
+    const langs = recognitionLanguages(lang)
+    let attemptIndex = 0
+    let retryAfterEnd = false
+
+    const startRecognitionAttempt = () => {
+      const currentLang = langs[Math.min(attemptIndex, langs.length - 1)]
+      const recognition = new SpeechRecognition()
+      recognitionRef.current = recognition
+      recognition.continuous = false
+      recognition.interimResults = false
+      recognition.maxAlternatives = 5
+      recognition.lang = currentLang
+
+      recognition.onstart = () => {
+        setListeningQid(qid)
+        setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Listening... (${currentLang})` }))
+      }
+
+      recognition.onresult = (event) => {
+        const transcript = (event.results?.[0]?.[0]?.transcript || '').trim()
+        if (opts.numericOnly) {
+          const ok = selectBySpokenNumber(qid, transcript)
+          if (!ok) {
+            setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Heard: "${transcript}" (not a valid option number)` }))
+          }
+          return
+        }
+
+        const best = findBestOption(options, transcript)
+        if (best) {
+          setAnswer(qid, best.option.option_value)
+          const label = best.option.hindi_option_label || best.option.option_label || best.option.option_value
+          setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Heard: "${transcript}" -> selected: "${label}"` }))
+        } else {
+          setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Heard: "${transcript}" (no close option match)` }))
+        }
+      }
+
+      recognition.onerror = (event) => {
+        if (event.error === 'aborted') return
+
+        if (event.error === 'network' && attemptIndex + 1 < langs.length) {
+          attemptIndex += 1
+          retryAfterEnd = true
+          setVoiceStatusByQid(prev => ({
+            ...prev,
+            [qid]: `Voice network issue. Retrying with ${langs[attemptIndex]}...`,
+          }))
+          recognition.abort()
+          return
+        }
+
+        if (event.error === 'network') {
+          setVoiceStatusByQid(prev => ({
+            ...prev,
+            [qid]: 'Voice input error: network. Check internet, allow microphone permission, and use localhost/https.',
+          }))
+          return
+        }
+
+        setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Voice input error: ${event.error}` }))
+      }
+
+      recognition.onend = () => {
+        if (retryAfterEnd) {
+          retryAfterEnd = false
+          startRecognitionAttempt()
+          return
+        }
+        setListeningQid(prev => (prev === qid ? null : prev))
+        recognitionRef.current = null
+      }
+
+      recognition.start()
+    }
+
+    startRecognitionAttempt()
+  }
+
+  function selectBySpokenNumber(questionId, spoken) {
+    const n = parseInt((spoken || '').match(/\d+/)?.[0], 10)
+    if (!n || n <= 0) return false
+    const opts = optionsByQid[questionId] || []
+    const idx = n - 1
+    if (idx < 0 || idx >= opts.length) return false
+    setAnswer(questionId, opts[idx].option_value)
+    setVoiceStatusByQid(prev => ({ ...prev, [questionId]: `Spoken number: ${n} -> selected option ${n}` }))
+    return true
   }
 
   const filtered = selectedScale
@@ -156,6 +374,11 @@ export default function App() {
                 index={globalIdx}
                 speakText={speakText}
                 playingId={playingId}
+                selectedValue={answersByQid[q.question_id] ?? ''}
+                onSelectOption={value => setAnswer(q.question_id, value)}
+                onReadAndVoiceSelect={(opts) => readAndSelectByVoice(q, optionsByQid[q.question_id] || [], opts)}
+                isListening={listeningQid === q.question_id}
+                voiceStatus={voiceStatusByQid[q.question_id]}
               />
             )
           })}
