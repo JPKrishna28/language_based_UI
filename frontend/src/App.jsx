@@ -59,6 +59,13 @@ function scoreOptionMatch(option, transcript, index) {
   return score
 }
 
+// Safari (macOS + iOS) requires SpeechRecognition.start() to be called
+// synchronously inside a user gesture — it silently fails after awaits.
+const isSafari =
+  typeof navigator !== 'undefined' &&
+  /safari/i.test(navigator.userAgent) &&
+  !/chrome|chromium|crios|edg|android/i.test(navigator.userAgent)
+
 function findBestOption(options, transcript) {
   let best = null
   let bestScore = 0
@@ -232,39 +239,50 @@ export default function App() {
     // Must run synchronously in the click gesture, before any await (Safari).
     unlockAudio()
 
-    setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Requesting microphone...' }))
-    try {
-      await ensureMicPermission()
-    } catch (err) {
-      if (err.code === 'insecure-context') {
-        setError('Microphone is blocked on insecure pages. Open the app via https:// or http://localhost (Safari blocks the mic on plain http over an IP address).')
-      } else if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
-        setError('Microphone permission was denied. In Safari: Settings > Websites > Microphone (macOS) or Settings app > Safari > Microphone (iOS), then reload.')
-      } else if (err.name === 'NotFoundError') {
-        setError('No microphone was found on this device.')
+    if (!isSafari) {
+      setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Requesting microphone...' }))
+      try {
+        await ensureMicPermission()
+      } catch (err) {
+        if (err.code === 'insecure-context') {
+          setError('Microphone is blocked on insecure pages. Open the app via https:// or http://localhost (Safari blocks the mic on plain http over an IP address).')
+        } else if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
+          setError('Microphone permission was denied. In Safari: Settings > Websites > Microphone (macOS) or Settings app > Safari > Microphone (iOS), then reload.')
+        } else if (err.name === 'NotFoundError') {
+          setError('No microphone was found on this device.')
+        } else {
+          setError(`Microphone unavailable: ${err.name || err.message}`)
+        }
+        setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Microphone not available' }))
+        return
+      }
+
+      setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Reading options...' }))
+
+      const qText = question.hindi_question_text || question.question_text
+      await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(qText)}`, `q-${qid}`)
+
+      if (!opts.numericOnly) {
+        for (const option of options) {
+          const optionText = option.hindi_option_label || option.option_label
+          await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(optionText)}`, `o-${option.option_id}`)
+        }
       } else {
-        setError(`Microphone unavailable: ${err.name || err.message}`)
+        setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Speak option number (e.g. 1) now' }))
       }
-      setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Microphone not available' }))
-      return
-    }
 
-    setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Reading options...' }))
-
-    const qText = question.hindi_question_text || question.question_text
-    await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(qText)}`, `q-${qid}`)
-
-    if (!opts.numericOnly) {
-      for (const option of options) {
-        const optionText = option.hindi_option_label || option.option_label
-        await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(optionText)}`, `o-${option.option_id}`)
-      }
+      // A short pause helps avoid microphone handoff glitches right after audio playback.
+      await new Promise(resolve => setTimeout(resolve, 250))
     } else {
-      setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Speak option number (e.g. 1) now' }))
+      // Safari kills speech recognition once the user gesture expires, so we
+      // cannot read the question aloud first — start listening immediately.
+      setVoiceStatusByQid(prev => ({
+        ...prev,
+        [qid]: opts.numericOnly
+          ? 'Speak the option number now (e.g. 1)'
+          : 'Speak your answer now (use the speaker buttons first if you need the question read aloud)',
+      }))
     }
-
-    // A short pause helps avoid microphone handoff glitches right after audio playback.
-    await new Promise(resolve => setTimeout(resolve, 250))
 
     const langs = recognitionLanguages(lang)
     let attemptIndex = 0
@@ -330,6 +348,14 @@ export default function App() {
           setVoiceStatusByQid(prev => ({
             ...prev,
             [qid]: 'Microphone permission denied. Allow it in browser settings and reload.',
+          }))
+          return
+        }
+
+        if (event.error === 'language-not-supported') {
+          setVoiceStatusByQid(prev => ({
+            ...prev,
+            [qid]: `Speech language ${currentLang} not supported here. On Safari, add it as a Dictation language in system settings, or switch Voice to English.`,
           }))
           return
         }
