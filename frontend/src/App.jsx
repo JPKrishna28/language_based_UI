@@ -194,10 +194,33 @@ export default function App() {
     return ['en-IN', 'en-US']
   }
 
+  // Safari only allows audio playback started from a user gesture. Playing a tiny
+  // silent clip synchronously in the click handler marks the shared <audio> element
+  // as user-activated so later TTS play() calls (after awaits) are not blocked.
+  function unlockAudio() {
+    const audio = audioRef.current
+    audio.src = 'data:audio/wav;base64,UklGRiQAAABXQVZFZm10IBAAAAABAAEAQB8AAIA+AAACABAAZGF0YQAAAAA='
+    audio.play().catch(() => {})
+  }
+
+  // Safari never shows a mic prompt for SpeechRecognition.start() once the user
+  // gesture has expired, so we must request permission explicitly while still
+  // inside the click gesture.
+  async function ensureMicPermission() {
+    if (!window.isSecureContext) {
+      throw Object.assign(new Error('insecure'), { code: 'insecure-context' })
+    }
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw Object.assign(new Error('unsupported'), { code: 'no-media-devices' })
+    }
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true })
+    stream.getTracks().forEach(track => track.stop())
+  }
+
   async function readAndSelectByVoice(question, options, opts = {}) {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SpeechRecognition) {
-      setError('Speech recognition is not supported in this browser. Use Chrome/Edge.')
+      setError('Speech recognition is not supported in this browser. Use Chrome/Edge, or Safari 14.1+ with Siri & Dictation enabled.')
       return
     }
 
@@ -205,6 +228,27 @@ export default function App() {
     stopSpeak()
     stopListening()
     setError(null)
+
+    // Must run synchronously in the click gesture, before any await (Safari).
+    unlockAudio()
+
+    setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Requesting microphone...' }))
+    try {
+      await ensureMicPermission()
+    } catch (err) {
+      if (err.code === 'insecure-context') {
+        setError('Microphone is blocked on insecure pages. Open the app via https:// or http://localhost (Safari blocks the mic on plain http over an IP address).')
+      } else if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
+        setError('Microphone permission was denied. In Safari: Settings > Websites > Microphone (macOS) or Settings app > Safari > Microphone (iOS), then reload.')
+      } else if (err.name === 'NotFoundError') {
+        setError('No microphone was found on this device.')
+      } else {
+        setError(`Microphone unavailable: ${err.name || err.message}`)
+      }
+      setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Microphone not available' }))
+      return
+    }
+
     setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Reading options...' }))
 
     const qText = question.hindi_question_text || question.question_text
@@ -278,6 +322,23 @@ export default function App() {
           setVoiceStatusByQid(prev => ({
             ...prev,
             [qid]: 'Voice input error: network. Check internet, allow microphone permission, and use localhost/https.',
+          }))
+          return
+        }
+
+        if (event.error === 'not-allowed') {
+          setVoiceStatusByQid(prev => ({
+            ...prev,
+            [qid]: 'Microphone permission denied. Allow it in browser settings and reload.',
+          }))
+          return
+        }
+
+        if (event.error === 'service-not-allowed') {
+          // Safari fires this when Siri & Dictation are turned off at the OS level.
+          setVoiceStatusByQid(prev => ({
+            ...prev,
+            [qid]: 'Speech service unavailable. On Safari, enable Siri or Dictation in system settings, then reload.',
           }))
           return
         }

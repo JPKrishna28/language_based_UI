@@ -5,22 +5,22 @@ import time
 
 from sarvamai import SarvamAI
 
-INPUT_FILE = "prs_questions_rows (1).csv"
-OUTPUT_FILE = "prs_questions_rows_hindi.csv"
-NEW_COLUMN = "hindi_question_text"
+INPUT_FILE = "prs_options_rows.csv"
+OUTPUT_FILE = "prs_options_rows_marathi.csv"
+NEW_COLUMN = "marathi_option_text"
 
 API_KEY = os.environ.get("SARVAM_API_KEY", "sk_8b6glthl_eZRz1ZBE0nluaoVJOdk7855O")
 
 client = SarvamAI(api_subscription_key=API_KEY)
 
 
-def translate_to_hindi(text: str) -> str:
+def translate_to_marathi(text: str) -> str:
     if not text or not text.strip():
         return ""
     response = client.text.translate(
         input=text,
         source_language_code="en-IN",
-        target_language_code="hi-IN",
+        target_language_code="mr-IN",
         speaker_gender="Male",
         mode="formal",
         model="mayura:v1",
@@ -43,14 +43,14 @@ def main():
 
     total = len(rows)
     for i, row in enumerate(rows, 1):
-        question = row.get("question_text", "") or ""
+        option = row.get("option_label", "") or ""
         try:
-            hindi = translate_to_hindi(question)
+            marathi = translate_to_marathi(option)
         except Exception as e:
             print(f"[{i}/{total}] ERROR: {e}", file=sys.stderr)
-            hindi = ""
-        row[NEW_COLUMN] = hindi
-        print(f"[{i}/{total}] {question[:60]} -> {hindi[:60]}")
+            marathi = ""
+        row[NEW_COLUMN] = marathi
+        print(f"[{i}/{total}] {option[:60]} -> {marathi[:60]}")
         time.sleep(0.3)
 
     with open(OUTPUT_FILE, "w", encoding="utf-8", newline="") as f:
