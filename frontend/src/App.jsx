@@ -112,41 +112,57 @@ export default function App() {
     }
   }, [])
 
+  // Supabase clamps every response to max_rows (default 1000), regardless of
+  // .range() — option translations alone exceed 5000 rows, so page through.
+  async function fetchAllRows(table, columns, orderCol, applyFilters) {
+    const pageSize = 1000
+    const all = []
+    for (let from = 0; ; from += pageSize) {
+      let query = supabase.from(table).select(columns).order(orderCol).range(from, from + pageSize - 1)
+      if (applyFilters) query = applyFilters(query)
+      const { data, error } = await query
+      if (error) throw new Error(`${table}: ${error.message}`)
+      all.push(...(data || []))
+      if (!data || data.length < pageSize) return all
+    }
+  }
+
   async function fetchData() {
     setLoading(true)
     setError(null)
 
-    // .range() overrides Supabase's default 1000-row cap (option translations alone are ~6400 rows)
-    const [qRes, oRes, qtRes, otRes] = await Promise.all([
-      supabase.from('prs_questions').select('*').order('display_order').range(0, 9999),
-      supabase.from('prs_options').select('*').eq('status', true).order('display_order').range(0, 9999),
-      supabase.from('prs_question_translations').select('question_id, lang, question_text').range(0, 9999),
-      supabase.from('prs_option_translations').select('option_id, lang, option_label').range(0, 9999),
-    ])
-
-    if (qRes.error) { setError(qRes.error.message); setLoading(false); return }
-    if (oRes.error) { setError(oRes.error.message); setLoading(false); return }
-    if (qtRes.error) { setError(qtRes.error.message); setLoading(false); return }
-    if (otRes.error) { setError(otRes.error.message); setLoading(false); return }
+    let qData, oData, qtData, otData
+    try {
+      ;[qData, oData, qtData, otData] = await Promise.all([
+        fetchAllRows('prs_questions', '*', 'question_id'),
+        fetchAllRows('prs_options', '*', 'option_id', q => q.eq('status', true)),
+        fetchAllRows('prs_question_translations', 'question_id, lang, question_text', 'question_id'),
+        fetchAllRows('prs_option_translations', 'option_id, lang, option_label', 'option_id'),
+      ])
+    } catch (err) {
+      setError(err.message)
+      setLoading(false)
+      return
+    }
 
     const qTrans = {}
-    for (const t of (qtRes.data || [])) {
+    for (const t of qtData) {
       if (!qTrans[t.lang]) qTrans[t.lang] = {}
       qTrans[t.lang][t.question_id] = t.question_text
     }
     const oTrans = {}
-    for (const t of (otRes.data || [])) {
+    for (const t of otData) {
       if (!oTrans[t.lang]) oTrans[t.lang] = {}
       oTrans[t.lang][t.option_id] = t.option_label
     }
 
-    const qs = (qRes.data || []).sort((a, b) =>
+    const qs = qData.sort((a, b) =>
       (a.scale_id || '').localeCompare(b.scale_id || '') ||
       ((a.display_order || 0) - (b.display_order || 0))
     )
 
     const byQid = {}
-    for (const o of (oRes.data || [])) {
+    for (const o of oData) {
       if (!byQid[o.question_id]) byQid[o.question_id] = []
       byQid[o.question_id].push(o)
     }
