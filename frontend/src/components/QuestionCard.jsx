@@ -1,6 +1,9 @@
 export default function QuestionCard({
   question,
   options,
+  lang,
+  getQuestionText,
+  getOptionLabel,
   index,
   speakText,
   playingId,
@@ -10,8 +13,9 @@ export default function QuestionCard({
   isListening,
   voiceStatus,
 }) {
-  const qText = question.hindi_question_text || question.question_text
+  const qText = getQuestionText(question)
   const qSpeakId = `q-${question.question_id}`
+  const showEnglishSub = lang !== 'en' && qText !== question.question_text
 
   return (
     <div className="question-card">
@@ -42,7 +46,7 @@ export default function QuestionCard({
           Speak option number
         </button>
       </div>
-      <div className="question-sub">{question.question_text}</div>
+      {showEnglishSub && <div className="question-sub">{question.question_text}</div>}
       {voiceStatus && <div className="voice-status">{voiceStatus}</div>}
 
       <div className="options">
@@ -50,7 +54,7 @@ export default function QuestionCard({
           <em>No options</em>
         ) : (
           options.map(o => {
-            const oText = o.hindi_option_label || o.option_label
+            const oText = getOptionLabel(o)
             const oSpeakId = `o-${o.option_id}`
             const isSelected = String(selectedValue) === String(o.option_value)
             return (

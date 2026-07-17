@@ -13,21 +13,21 @@ function normalizeText(value) {
 function numberHints(index) {
   const n = index + 1
   const map = {
-    1: ['1', 'one', 'first', 'option 1', 'option one', 'पहला', 'एक'],
-    2: ['2', 'two', 'second', 'option 2', 'option two', 'दूसरा', 'दो'],
-    3: ['3', 'three', 'third', 'option 3', 'option three', 'तीसरा', 'तीन'],
+    1: ['1', 'one', 'first', 'option 1', 'option one', 'पहला', 'एक', 'पहिला'],
+    2: ['2', 'two', 'second', 'option 2', 'option two', 'दूसरा', 'दो', 'दुसरा', 'दोन'],
+    3: ['3', 'three', 'third', 'option 3', 'option three', 'तीसरा', 'तीन', 'तिसरा'],
     4: ['4', 'four', 'fourth', 'option 4', 'option four', 'चौथा', 'चार'],
-    5: ['5', 'five', 'fifth', 'option 5', 'option five', 'पांचवा', 'पांच'],
+    5: ['5', 'five', 'fifth', 'option 5', 'option five', 'पांचवा', 'पांच', 'पाचवा', 'पाच'],
   }
   return map[n] || [String(n), `option ${n}`]
 }
 
-function scoreOptionMatch(option, transcript, index) {
+function scoreOptionMatch(option, translatedLabel, transcript, index) {
   const t = normalizeText(transcript)
   if (!t) return 0
 
   const labels = [
-    normalizeText(option.hindi_option_label),
+    normalizeText(translatedLabel),
     normalizeText(option.option_label),
     normalizeText(option.option_value),
   ].filter(Boolean)
@@ -66,12 +66,12 @@ const isSafari =
   /safari/i.test(navigator.userAgent) &&
   !/chrome|chromium|crios|edg|android/i.test(navigator.userAgent)
 
-function findBestOption(options, transcript) {
+function findBestOption(options, getOptionLabel, transcript) {
   let best = null
   let bestScore = 0
 
   options.forEach((option, index) => {
-    const score = scoreOptionMatch(option, transcript, index)
+    const score = scoreOptionMatch(option, getOptionLabel(option), transcript, index)
     if (score > bestScore) {
       best = option
       bestScore = score
@@ -85,6 +85,9 @@ function findBestOption(options, transcript) {
 export default function App() {
   const [questions, setQuestions] = useState([])
   const [optionsByQid, setOptionsByQid] = useState({})
+  // { [lang]: { [question_id]: text } } and { [lang]: { [option_id]: label } }
+  const [questionTranslations, setQuestionTranslations] = useState({})
+  const [optionTranslations, setOptionTranslations] = useState({})
   const [answersByQid, setAnswersByQid] = useState({})
   const [scales, setScales] = useState([])
   const [selectedScale, setSelectedScale] = useState('')
@@ -113,13 +116,29 @@ export default function App() {
     setLoading(true)
     setError(null)
 
-    const [qRes, oRes] = await Promise.all([
-      supabase.from('prs_questions').select('*').order('display_order'),
-      supabase.from('prs_options').select('*').eq('status', true).order('display_order'),
+    // .range() overrides Supabase's default 1000-row cap (option translations alone are ~6400 rows)
+    const [qRes, oRes, qtRes, otRes] = await Promise.all([
+      supabase.from('prs_questions').select('*').order('display_order').range(0, 9999),
+      supabase.from('prs_options').select('*').eq('status', true).order('display_order').range(0, 9999),
+      supabase.from('prs_question_translations').select('question_id, lang, question_text').range(0, 9999),
+      supabase.from('prs_option_translations').select('option_id, lang, option_label').range(0, 9999),
     ])
 
     if (qRes.error) { setError(qRes.error.message); setLoading(false); return }
     if (oRes.error) { setError(oRes.error.message); setLoading(false); return }
+    if (qtRes.error) { setError(qtRes.error.message); setLoading(false); return }
+    if (otRes.error) { setError(otRes.error.message); setLoading(false); return }
+
+    const qTrans = {}
+    for (const t of (qtRes.data || [])) {
+      if (!qTrans[t.lang]) qTrans[t.lang] = {}
+      qTrans[t.lang][t.question_id] = t.question_text
+    }
+    const oTrans = {}
+    for (const t of (otRes.data || [])) {
+      if (!oTrans[t.lang]) oTrans[t.lang] = {}
+      oTrans[t.lang][t.option_id] = t.option_label
+    }
 
     const qs = (qRes.data || []).sort((a, b) =>
       (a.scale_id || '').localeCompare(b.scale_id || '') ||
@@ -137,8 +156,21 @@ export default function App() {
 
     setQuestions(qs)
     setOptionsByQid(byQid)
+    setQuestionTranslations(qTrans)
+    setOptionTranslations(oTrans)
     setScales([...new Set(qs.map(q => q.scale_id).filter(Boolean))].sort())
     setLoading(false)
+  }
+
+  // English lives in prs_questions/prs_options; hi/mr come from translation tables.
+  function getQuestionText(q) {
+    if (lang === 'en') return q.question_text
+    return questionTranslations[lang]?.[q.question_id] || q.question_text
+  }
+
+  function getOptionLabel(o) {
+    if (lang === 'en') return o.option_label
+    return optionTranslations[lang]?.[o.option_id] || o.option_label
   }
 
   function stopSpeak() {
@@ -182,11 +214,11 @@ export default function App() {
     const filtered = selectedScale ? questions.filter(q => q.scale_id === selectedScale) : questions
     for (const q of filtered) {
       if (stopFlagRef.current) return
-      const qText = q.hindi_question_text || q.question_text
+      const qText = getQuestionText(q)
       await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(qText)}`, `q-${q.question_id}`)
       for (const o of (optionsByQid[q.question_id] || [])) {
         if (stopFlagRef.current) return
-        const oText = o.hindi_option_label || o.option_label
+        const oText = getOptionLabel(o)
         await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(oText)}`, `o-${o.option_id}`)
       }
     }
@@ -198,6 +230,7 @@ export default function App() {
 
   function recognitionLanguages(selectedLang) {
     if (selectedLang === 'hi') return ['hi-IN', 'en-IN']
+    if (selectedLang === 'mr') return ['mr-IN', 'hi-IN', 'en-IN']
     return ['en-IN', 'en-US']
   }
 
@@ -259,12 +292,12 @@ export default function App() {
 
       setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Reading options...' }))
 
-      const qText = question.hindi_question_text || question.question_text
+      const qText = getQuestionText(question)
       await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(qText)}`, `q-${qid}`)
 
       if (!opts.numericOnly) {
         for (const option of options) {
-          const optionText = option.hindi_option_label || option.option_label
+          const optionText = getOptionLabel(option)
           await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(optionText)}`, `o-${option.option_id}`)
         }
       } else {
@@ -312,10 +345,10 @@ export default function App() {
           return
         }
 
-        const best = findBestOption(options, transcript)
+        const best = findBestOption(options, getOptionLabel, transcript)
         if (best) {
           setAnswer(qid, best.option.option_value)
-          const label = best.option.hindi_option_label || best.option.option_label || best.option.option_value
+          const label = getOptionLabel(best.option) || best.option.option_value
           setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Heard: "${transcript}" -> selected: "${label}"` }))
         } else {
           setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Heard: "${transcript}" (no close option match)` }))
@@ -431,10 +464,11 @@ export default function App() {
         </label>
 
         <label>
-          Voice&nbsp;
+          Language&nbsp;
           <select value={lang} onChange={e => setLang(e.target.value)}>
-            <option value="hi">Hindi</option>
             <option value="en">English</option>
+            <option value="hi">Hindi</option>
+            <option value="mr">Marathi</option>
           </select>
         </label>
 
@@ -458,6 +492,9 @@ export default function App() {
                 key={q.question_id}
                 question={q}
                 options={optionsByQid[q.question_id] || []}
+                lang={lang}
+                getQuestionText={getQuestionText}
+                getOptionLabel={getOptionLabel}
                 index={globalIdx}
                 speakText={speakText}
                 playingId={playingId}
