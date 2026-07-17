@@ -1,15 +1,12 @@
 import { createHash } from 'crypto'
-import { existsSync, mkdirSync, createReadStream } from 'fs'
+import { existsSync, mkdirSync, createReadStream, writeFileSync } from 'fs'
 import { join } from 'path'
-import { createRequire } from 'module'
-
-const require = createRequire(import.meta.url)
-const gtts = require('node-gtts')
+import { fetchTTS } from './_gtts.js'
 
 const CACHE_DIR = '/tmp/tts_cache'
 if (!existsSync(CACHE_DIR)) mkdirSync(CACHE_DIR, { recursive: true })
 
-export default function handler(req, res) {
+export default async function handler(req, res) {
   const text = String(req.query.text || '').trim().slice(0, 500)
   const lang = String(req.query.lang || 'hi').trim()
 
@@ -25,8 +22,11 @@ export default function handler(req, res) {
     return createReadStream(cacheFile).pipe(res)
   }
 
-  gtts(lang).save(cacheFile, text, err => {
-    if (err) return res.status(500).end(`TTS error: ${err.message}`)
-    createReadStream(cacheFile).pipe(res)
-  })
+  try {
+    const audio = await fetchTTS(text, lang)
+    writeFileSync(cacheFile, audio)
+    res.end(audio)
+  } catch (err) {
+    res.status(500).end(`TTS error: ${err.message}`)
+  }
 }

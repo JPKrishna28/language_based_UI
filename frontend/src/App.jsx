@@ -374,12 +374,15 @@ export default function App() {
       recognition.onerror = (event) => {
         if (event.error === 'aborted') return
 
-        if (event.error === 'network' && attemptIndex + 1 < langs.length) {
+        const retriable = event.error === 'network' || event.error === 'language-not-supported'
+        if (retriable && attemptIndex + 1 < langs.length) {
           attemptIndex += 1
           retryAfterEnd = true
           setVoiceStatusByQid(prev => ({
             ...prev,
-            [qid]: `Voice network issue. Retrying with ${langs[attemptIndex]}...`,
+            [qid]: event.error === 'network'
+              ? `Voice network issue. Retrying with ${langs[attemptIndex]}...`
+              : `${currentLang} speech not supported here. Retrying with ${langs[attemptIndex]}...`,
           }))
           recognition.abort()
           return

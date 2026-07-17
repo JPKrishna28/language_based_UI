@@ -1,14 +1,11 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
-import { createRequire } from 'module'
 import { createHash } from 'crypto'
-import { existsSync, mkdirSync, createReadStream } from 'fs'
+import { existsSync, mkdirSync, createReadStream, writeFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { parse } from 'url'
-
-const require = createRequire(import.meta.url)
-const gtts = require('node-gtts')
+import { fetchTTS } from './api/_gtts.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const CACHE_DIR = join(__dirname, 'tts_cache')
@@ -18,7 +15,7 @@ function gttsPlugin() {
   return {
     name: 'gtts-middleware',
     configureServer(server) {
-      server.middlewares.use('/api/tts', (req, res) => {
+      server.middlewares.use('/api/tts', async (req, res) => {
         const { query } = parse(req.url, true)
         const text = String(query.text || '').trim().slice(0, 500)
         const lang = String(query.lang || 'hi').trim()
@@ -38,13 +35,14 @@ function gttsPlugin() {
           return createReadStream(cacheFile).pipe(res)
         }
 
-        gtts(lang).save(cacheFile, text, err => {
-          if (err) {
-            res.statusCode = 500
-            return res.end(`TTS error: ${err.message}`)
-          }
-          createReadStream(cacheFile).pipe(res)
-        })
+        try {
+          const audio = await fetchTTS(text, lang)
+          writeFileSync(cacheFile, audio)
+          res.end(audio)
+        } catch (err) {
+          res.statusCode = 500
+          res.end(`TTS error: ${err.message}`)
+        }
       })
     }
   }
