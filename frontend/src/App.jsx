@@ -97,10 +97,20 @@ export default function App() {
   const [playingId, setPlayingId] = useState(null)
   const [listeningQid, setListeningQid] = useState(null)
   const [voiceStatusByQid, setVoiceStatusByQid] = useState({})
+  const [voiceMode, setVoiceMode] = useState(false)
+  const [activeVoiceQid, setActiveVoiceQid] = useState(null)
 
   const audioRef = useRef(new Audio())
   const stopFlagRef = useRef(false)
   const recognitionRef = useRef(null)
+  const voiceModeRef = useRef(false)
+  // Mirror of answersByQid so the async voice-survey loop always sees the
+  // latest answers without stale-closure issues.
+  const answersRef = useRef({})
+
+  useEffect(() => {
+    answersRef.current = answersByQid
+  }, [answersByQid])
 
   useEffect(() => {
     fetchData()
@@ -273,14 +283,119 @@ export default function App() {
     stream.getTracks().forEach(track => track.stop())
   }
 
-  async function readAndSelectByVoice(question, options, opts = {}) {
+  // One listen attempt with automatic language fallback. Resolves with:
+  //   { transcript }        — user said something
+  //   { error, errorLang }  — unrecoverable recognition error
+  //   { aborted: true }     — stopped externally
+  //   { }                   — recognition ended with no speech
+  function listenOnce(qid, langsChain) {
+    const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
+    return new Promise(resolve => {
+      let attemptIndex = 0
+      let retryAfterEnd = false
+      let settled = false
+      let result = null
+      const settle = value => {
+        if (!settled) {
+          settled = true
+          resolve(value)
+        }
+      }
+
+      const startAttempt = () => {
+        const currentLang = langsChain[Math.min(attemptIndex, langsChain.length - 1)]
+        const recognition = new SpeechRecognition()
+        recognitionRef.current = recognition
+        recognition.continuous = false
+        recognition.interimResults = false
+        recognition.maxAlternatives = 5
+        recognition.lang = currentLang
+
+        recognition.onstart = () => {
+          setListeningQid(qid)
+          setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Listening... (${currentLang})` }))
+        }
+
+        recognition.onresult = (event) => {
+          const transcript = (event.results?.[0]?.[0]?.transcript || '').trim()
+          result = { transcript }
+        }
+
+        recognition.onerror = (event) => {
+          if (event.error === 'aborted') {
+            result = { aborted: true }
+            return
+          }
+          const retriable = event.error === 'network' || event.error === 'language-not-supported'
+          if (retriable && attemptIndex + 1 < langsChain.length) {
+            attemptIndex += 1
+            retryAfterEnd = true
+            setVoiceStatusByQid(prev => ({
+              ...prev,
+              [qid]: event.error === 'network'
+                ? `Voice network issue. Retrying with ${langsChain[attemptIndex]}...`
+                : `${currentLang} speech not supported here. Retrying with ${langsChain[attemptIndex]}...`,
+            }))
+            recognition.abort()
+            return
+          }
+          result = { error: event.error, errorLang: currentLang }
+        }
+
+        recognition.onend = () => {
+          if (retryAfterEnd) {
+            retryAfterEnd = false
+            startAttempt()
+            return
+          }
+          setListeningQid(prev => (prev === qid ? null : prev))
+          recognitionRef.current = null
+          settle(result || {})
+        }
+
+        recognition.start()
+      }
+
+      startAttempt()
+    })
+  }
+
+  function describeRecognitionError(error, errorLang) {
+    if (error === 'network') {
+      return 'Voice input error: network. Check internet, allow microphone permission, and use localhost/https.'
+    }
+    if (error === 'not-allowed') {
+      return 'Microphone permission denied. Allow it in browser settings and reload.'
+    }
+    if (error === 'language-not-supported') {
+      return `Speech language ${errorLang} not supported here. On Safari, add it as a Dictation language in system settings, or switch Voice to English.`
+    }
+    if (error === 'service-not-allowed') {
+      // Safari fires this when Siri & Dictation are turned off at the OS level.
+      return 'Speech service unavailable. On Safari, enable Siri or Dictation in system settings, then reload.'
+    }
+    return `Voice input error: ${error}`
+  }
+
+  function stopVoiceSurvey() {
+    voiceModeRef.current = false
+    setVoiceMode(false)
+    setActiveVoiceQid(null)
+    stopSpeak()
+    stopListening()
+  }
+
+  // Guided voice survey: reads each question + options aloud, listens for the
+  // answer, records it, and moves to the next question automatically.
+  // resume=true starts right after the last answered question; otherwise it
+  // starts from the top, skipping questions that already have answers.
+  async function startVoiceSurvey({ resume = false } = {}) {
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
     if (!SpeechRecognition) {
       setError('Speech recognition is not supported in this browser. Use Chrome/Edge, or Safari 14.1+ with Siri & Dictation enabled.')
       return
     }
 
-    const qid = question.question_id
     stopSpeak()
     stopListening()
     setError(null)
@@ -288,77 +403,94 @@ export default function App() {
     // Must run synchronously in the click gesture, before any await (Safari).
     unlockAudio()
 
-    if (!isSafari) {
-      setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Requesting microphone...' }))
-      try {
-        await ensureMicPermission()
-      } catch (err) {
-        if (err.code === 'insecure-context') {
-          setError('Microphone is blocked on insecure pages. Open the app via https:// or http://localhost (Safari blocks the mic on plain http over an IP address).')
-        } else if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
-          setError('Microphone permission was denied. In Safari: Settings > Websites > Microphone (macOS) or Settings app > Safari > Microphone (iOS), then reload.')
-        } else if (err.name === 'NotFoundError') {
-          setError('No microphone was found on this device.')
-        } else {
-          setError(`Microphone unavailable: ${err.name || err.message}`)
-        }
-        setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Microphone not available' }))
-        return
-      }
-
-      setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Reading options...' }))
-
-      const qText = getQuestionText(question)
-      await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(qText)}`, `q-${qid}`)
-
-      if (!opts.numericOnly) {
-        for (const option of options) {
-          const optionText = getOptionLabel(option)
-          await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(optionText)}`, `o-${option.option_id}`)
-        }
+    try {
+      await ensureMicPermission()
+    } catch (err) {
+      if (err.code === 'insecure-context') {
+        setError('Microphone is blocked on insecure pages. Open the app via https:// or http://localhost (Safari blocks the mic on plain http over an IP address).')
+      } else if (err.name === 'NotAllowedError' || err.name === 'SecurityError') {
+        setError('Microphone permission was denied. Allow it in browser settings, then reload.')
+      } else if (err.name === 'NotFoundError') {
+        setError('No microphone was found on this device.')
       } else {
-        setVoiceStatusByQid(prev => ({ ...prev, [qid]: 'Speak option number (e.g. 1) now' }))
+        setError(`Microphone unavailable: ${err.name || err.message}`)
       }
-
-      // A short pause helps avoid microphone handoff glitches right after audio playback.
-      await new Promise(resolve => setTimeout(resolve, 250))
-    } else {
-      // Safari kills speech recognition once the user gesture expires, so we
-      // cannot read the question aloud first — start listening immediately.
-      setVoiceStatusByQid(prev => ({
-        ...prev,
-        [qid]: opts.numericOnly
-          ? 'Speak the option number now (e.g. 1)'
-          : 'Speak your answer now (use the speaker buttons first if you need the question read aloud)',
-      }))
+      return
     }
 
-    const langs = recognitionLanguages(lang)
-    let attemptIndex = 0
-    let retryAfterEnd = false
+    const list = selectedScale ? questions.filter(q => q.scale_id === selectedScale) : questions
+    if (list.length === 0) return
 
-    const startRecognitionAttempt = () => {
-      const currentLang = langs[Math.min(attemptIndex, langs.length - 1)]
-      const recognition = new SpeechRecognition()
-      recognitionRef.current = recognition
-      recognition.continuous = false
-      recognition.interimResults = false
-      recognition.maxAlternatives = 5
-      recognition.lang = currentLang
-
-      recognition.onstart = () => {
-        setListeningQid(qid)
-        setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Listening... (${currentLang})` }))
+    let startIdx = 0
+    if (resume) {
+      let lastAnswered = -1
+      list.forEach((q, i) => {
+        if (answersRef.current[q.question_id] != null) lastAnswered = i
+      })
+      startIdx = lastAnswered + 1
+      if (startIdx >= list.length) {
+        setError('All questions already have answers. Use "Start from beginning" to redo.')
+        return
       }
+    }
 
-      recognition.onresult = (event) => {
-        const transcript = (event.results?.[0]?.[0]?.transcript || '').trim()
-        if (opts.numericOnly) {
-          const ok = selectBySpokenNumber(qid, transcript)
-          if (!ok) {
-            setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Heard: "${transcript}" (not a valid option number)` }))
+    voiceModeRef.current = true
+    setVoiceMode(true)
+    stopFlagRef.current = false
+    const langsChain = recognitionLanguages(lang)
+
+    for (let i = startIdx; i < list.length; i++) {
+      if (!voiceModeRef.current) break
+      const q = list[i]
+      const qid = q.question_id
+
+      // From-the-beginning runs skip questions already answered.
+      if (!resume && answersRef.current[qid] != null) continue
+
+      const options = optionsByQid[qid] || []
+      if (options.length === 0) continue
+
+      setActiveVoiceQid(qid)
+      document.getElementById(`qcard-${qid}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+
+      // Read the question, then each option.
+      const qText = getQuestionText(q)
+      await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(qText)}`, `q-${qid}`)
+      if (!voiceModeRef.current) break
+      for (const option of options) {
+        const optionText = getOptionLabel(option)
+        await playUrl(`/api/tts?lang=${lang}&text=${encodeURIComponent(optionText)}`, `o-${option.option_id}`)
+        if (!voiceModeRef.current) break
+      }
+      if (!voiceModeRef.current) break
+
+      // Short pause avoids microphone handoff glitches right after playback.
+      await new Promise(resolve => setTimeout(resolve, 250))
+
+      // Up to two listen attempts per question, then move on unanswered.
+      let answered = false
+      for (let attempt = 0; attempt < 2 && !answered; attempt++) {
+        if (!voiceModeRef.current) break
+        const res = await listenOnce(qid, langsChain)
+        if (!voiceModeRef.current || res.aborted) break
+
+        if (res.error) {
+          setVoiceStatusByQid(prev => ({ ...prev, [qid]: describeRecognitionError(res.error, res.errorLang) }))
+          // Hard errors (mic denied, no service) end the whole survey.
+          if (res.error === 'not-allowed' || res.error === 'service-not-allowed') {
+            stopVoiceSurvey()
+            return
           }
-          return
+          break
+        }
+
+        const transcript = res.transcript || ''
+        if (!transcript) {
+          setVoiceStatusByQid(prev => ({
+            ...prev,
+            [qid]: attempt === 0 ? 'No speech heard. Listening again...' : 'No speech heard. Moving to next question.',
+          }))
+          continue
         }
 
         const best = findBestOption(options, getOptionLabel, transcript)
@@ -366,89 +498,25 @@ export default function App() {
           setAnswer(qid, best.option.option_value)
           const label = getOptionLabel(best.option) || best.option.option_value
           setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Heard: "${transcript}" -> selected: "${label}"` }))
+          answered = true
         } else {
-          setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Heard: "${transcript}" (no close option match)` }))
+          setVoiceStatusByQid(prev => ({
+            ...prev,
+            [qid]: attempt === 0
+              ? `Heard: "${transcript}" (no match). Say the option or its number...`
+              : `Heard: "${transcript}" (no match). Moving to next question.`,
+          }))
         }
       }
 
-      recognition.onerror = (event) => {
-        if (event.error === 'aborted') return
-
-        const retriable = event.error === 'network' || event.error === 'language-not-supported'
-        if (retriable && attemptIndex + 1 < langs.length) {
-          attemptIndex += 1
-          retryAfterEnd = true
-          setVoiceStatusByQid(prev => ({
-            ...prev,
-            [qid]: event.error === 'network'
-              ? `Voice network issue. Retrying with ${langs[attemptIndex]}...`
-              : `${currentLang} speech not supported here. Retrying with ${langs[attemptIndex]}...`,
-          }))
-          recognition.abort()
-          return
-        }
-
-        if (event.error === 'network') {
-          setVoiceStatusByQid(prev => ({
-            ...prev,
-            [qid]: 'Voice input error: network. Check internet, allow microphone permission, and use localhost/https.',
-          }))
-          return
-        }
-
-        if (event.error === 'not-allowed') {
-          setVoiceStatusByQid(prev => ({
-            ...prev,
-            [qid]: 'Microphone permission denied. Allow it in browser settings and reload.',
-          }))
-          return
-        }
-
-        if (event.error === 'language-not-supported') {
-          setVoiceStatusByQid(prev => ({
-            ...prev,
-            [qid]: `Speech language ${currentLang} not supported here. On Safari, add it as a Dictation language in system settings, or switch Voice to English.`,
-          }))
-          return
-        }
-
-        if (event.error === 'service-not-allowed') {
-          // Safari fires this when Siri & Dictation are turned off at the OS level.
-          setVoiceStatusByQid(prev => ({
-            ...prev,
-            [qid]: 'Speech service unavailable. On Safari, enable Siri or Dictation in system settings, then reload.',
-          }))
-          return
-        }
-
-        setVoiceStatusByQid(prev => ({ ...prev, [qid]: `Voice input error: ${event.error}` }))
-      }
-
-      recognition.onend = () => {
-        if (retryAfterEnd) {
-          retryAfterEnd = false
-          startRecognitionAttempt()
-          return
-        }
-        setListeningQid(prev => (prev === qid ? null : prev))
-        recognitionRef.current = null
-      }
-
-      recognition.start()
+      if (!voiceModeRef.current) break
+      // Brief gap before the next question.
+      await new Promise(resolve => setTimeout(resolve, 400))
     }
 
-    startRecognitionAttempt()
-  }
-
-  function selectBySpokenNumber(questionId, spoken) {
-    const n = parseInt((spoken || '').match(/\d+/)?.[0], 10)
-    if (!n || n <= 0) return false
-    const opts = optionsByQid[questionId] || []
-    const idx = n - 1
-    if (idx < 0 || idx >= opts.length) return false
-    setAnswer(questionId, opts[idx].option_value)
-    setVoiceStatusByQid(prev => ({ ...prev, [questionId]: `Spoken number: ${n} -> selected option ${n}` }))
-    return true
+    voiceModeRef.current = false
+    setVoiceMode(false)
+    setActiveVoiceQid(null)
   }
 
   const filtered = selectedScale
@@ -466,6 +534,8 @@ export default function App() {
     groups[groups.length - 1].questions.push(q)
   }
 
+  const answeredCount = filtered.filter(q => answersByQid[q.question_id] != null).length
+
   // Flat index across all groups for display numbering
   let globalIdx = 0
 
@@ -476,7 +546,7 @@ export default function App() {
       <div className="controls">
         <label>
           Scale&nbsp;
-          <select value={selectedScale} onChange={e => setSelectedScale(e.target.value)}>
+          <select value={selectedScale} onChange={e => setSelectedScale(e.target.value)} disabled={voiceMode}>
             <option value="">All ({questions.length})</option>
             {scales.map(s => <option key={s} value={s}>{s}</option>)}
           </select>
@@ -484,15 +554,38 @@ export default function App() {
 
         <label>
           Language&nbsp;
-          <select value={lang} onChange={e => setLang(e.target.value)}>
+          <select value={lang} onChange={e => setLang(e.target.value)} disabled={voiceMode}>
             <option value="en">English</option>
             <option value="hi">Hindi</option>
             <option value="mr">Marathi</option>
           </select>
         </label>
 
-        <button className="btn-green" onClick={speakAll}>&#9654; Read all</button>
+        <button className="btn-green" onClick={speakAll} disabled={voiceMode}>&#9654; Read all</button>
         <button className="btn-gray" onClick={stopSpeak}>&#9632; Stop</button>
+      </div>
+
+      <div className="controls voice-controls">
+        {!voiceMode ? (
+          <>
+            <button className="btn-green" onClick={() => startVoiceSurvey()}>
+              &#127908; Answer by Voice (from start)
+            </button>
+            <button
+              className="btn-green"
+              onClick={() => startVoiceSurvey({ resume: true })}
+              disabled={answeredCount === 0}
+            >
+              &#127908; Resume from last answered
+            </button>
+          </>
+        ) : (
+          <button className="btn-gray" onClick={stopVoiceSurvey}>&#9632; Stop voice survey</button>
+        )}
+        <span className="voice-progress">
+          Answered {answeredCount} / {filtered.length}
+          {voiceMode && ' — voice survey running...'}
+        </span>
       </div>
 
       {loading && <p className="status">Loading from Supabase&hellip;</p>}
@@ -519,8 +612,8 @@ export default function App() {
                 playingId={playingId}
                 selectedValue={answersByQid[q.question_id] ?? ''}
                 onSelectOption={value => setAnswer(q.question_id, value)}
-                onReadAndVoiceSelect={(opts) => readAndSelectByVoice(q, optionsByQid[q.question_id] || [], opts)}
                 isListening={listeningQid === q.question_id}
+                isActiveVoice={activeVoiceQid === q.question_id}
                 voiceStatus={voiceStatusByQid[q.question_id]}
               />
             )

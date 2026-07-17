@@ -87,6 +87,31 @@ h1 {
   margin: 0.75rem 0;
 }
 
+.question-card.voice-active {
+  border-color: #5b6cff;
+  box-shadow: 0 0 0 2px rgba(91, 108, 255, 0.35);
+}
+
+.listening-badge {
+  color: #d33;
+  font-size: 0.85rem;
+  font-weight: 600;
+  animation: pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.4; }
+}
+
+.voice-controls { margin-top: 0.5rem; }
+
+.voice-progress {
+  color: #555;
+  font-size: 0.9rem;
+  align-self: center;
+}
+
 .question-title {
   font-weight: 600;
   margin-bottom: 0.25rem;

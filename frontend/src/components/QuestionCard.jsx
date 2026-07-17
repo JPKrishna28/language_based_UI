@@ -9,8 +9,8 @@ export default function QuestionCard({
   playingId,
   selectedValue,
   onSelectOption,
-  onReadAndVoiceSelect,
   isListening,
+  isActiveVoice,
   voiceStatus,
 }) {
   const qText = getQuestionText(question)
@@ -18,7 +18,10 @@ export default function QuestionCard({
   const showEnglishSub = lang !== 'en' && qText !== question.question_text
 
   return (
-    <div className="question-card">
+    <div
+      id={`qcard-${question.question_id}`}
+      className={`question-card${isActiveVoice ? ' voice-active' : ''}`}
+    >
       <div className="question-title">
         <span className="q-num">{index}.</span>
         <span className="q-hi">{qText}</span>
@@ -28,23 +31,7 @@ export default function QuestionCard({
         >
           &#128266;
         </button>
-        <button
-          className={`voice-btn${isListening ? ' listening' : ''}`}
-          onClick={onReadAndVoiceSelect}
-          type="button"
-        >
-          {isListening ? 'Listening...' : 'Read + Answer by Voice'}
-        </button>
-        <button
-          className="voice-btn"
-          onClick={() => {
-            // trigger numeric-only listen fallback
-            if (typeof onReadAndVoiceSelect === 'function') onReadAndVoiceSelect({ numericOnly: true })
-          }}
-          type="button"
-        >
-          Speak option number
-        </button>
+        {isListening && <span className="listening-badge">&#127908; Listening...</span>}
       </div>
       {showEnglishSub && <div className="question-sub">{question.question_text}</div>}
       {voiceStatus && <div className="voice-status">{voiceStatus}</div>}
